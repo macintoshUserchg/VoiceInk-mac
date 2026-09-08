@@ -29,9 +29,8 @@ class AIEnhancementService: ObservableObject {
     private let aiService: AIService
     private let screenCaptureService: ScreenCaptureService
     private let customVocabularyService: CustomVocabularyService
-    private var baseTimeout: TimeInterval {
-        let stored = UserDefaults.standard.integer(forKey: "EnhancementTimeoutSeconds")
-        return stored > 0 ? TimeInterval(stored) : 7
+    private var requestTimeout: TimeInterval {
+        EnhancementRequestSettings.timeout
     }
     private let rateLimitInterval: TimeInterval = 1.0
     private var lastRequestTime: Date?
@@ -240,7 +239,7 @@ class AIEnhancementService: ObservableObject {
                     text: formattedText,
                     systemPrompt: systemMessage,
                     model: modelName,
-                    timeout: baseTimeout
+                    timeout: requestTimeout
                 )
                 return (
                     AIEnhancementOutputFilter.filter(result),
@@ -281,7 +280,9 @@ class AIEnhancementService: ObservableObject {
             }
         }
 
-        try await waitForRateLimit()
+        if provider != .openRouter {
+            try await waitForRateLimit()
+        }
 
         do {
             let result: String
@@ -294,7 +295,7 @@ class AIEnhancementService: ObservableObject {
                     systemPrompt: systemMessage,
                     thinkingLevel: ReasoningConfig.geminiThinkingLevel(for: modelName),
                     store: false,
-                    timeout: baseTimeout
+                    timeout: requestTimeout
                 )
             case .anthropic:
                 result = try await AnthropicLLMClient.chatCompletion(
@@ -302,8 +303,37 @@ class AIEnhancementService: ObservableObject {
                     model: modelName,
                     messages: [.user(formattedText)],
                     systemPrompt: systemMessage,
-                    timeout: baseTimeout
+                    timeout: requestTimeout
                 )
+            case .openRouter:
+                let modelMetadata = aiService.openRouterModelMetadata(for: modelName)
+                let policy = OpenRouterRequestPolicy.lowLatency(
+                    modelName: modelName,
+                    modelMetadata: modelMetadata
+                )
+                let completion = try await OpenRouterClient.chatCompletion(
+                    apiKey: try apiKey(for: provider, modelName: modelName),
+                    model: policy.model,
+                    messages: [.user(formattedText)],
+                    systemPrompt: systemMessage,
+                    temperature: policy.temperature,
+                    reasoning: policy.reasoning,
+                    provider: policy.provider,
+                    includeRouterMetadata: true,
+                    appReferer: URL(string: "https://tryvoiceink.com"),
+                    appTitle: "VoiceInk",
+                    timeout: requestTimeout
+                )
+                guard !OpenRouterRequestPolicy.outputWasTruncated(finishReason: completion.finishReason) else {
+                    throw EnhancementError.outputTruncated
+                }
+                let routedProvider = completion.provider ?? "unknown"
+                let routingAttempt = completion.metadata?.attempt ?? 0
+                let reasoningTokens = completion.usage?.reasoningTokens ?? 0
+                logger.debug(
+                    "OpenRouter completed requestedModel=\(modelName, privacy: .public) routedProvider=\(routedProvider, privacy: .public) routingAttempt=\(routingAttempt, privacy: .public) reasoningTokens=\(reasoningTokens, privacy: .public)"
+                )
+                result = completion.text
             case .custom:
                 guard
                     let customConfiguration = CustomAIProviderManager.shared.requestConfiguration(forModel: modelName),
@@ -318,7 +348,7 @@ class AIEnhancementService: ObservableObject {
                     messages: [.user(formattedText)],
                     systemPrompt: systemMessage,
                     temperature: 0.3,
-                    timeout: baseTimeout
+                    timeout: requestTimeout
                 )
             default:
                 guard let baseURL = URL(string: provider.baseURL) else {
@@ -342,13 +372,17 @@ class AIEnhancementService: ObservableObject {
                     temperature: 0.3,
                     reasoningEffort: reasoningEffort,
                     extraBody: extraBody,
-                    timeout: baseTimeout
+                    timeout: requestTimeout
                 )
             }
+            let filteredResult = AIEnhancementOutputFilter.filter(
+                result.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+            guard !filteredResult.isEmpty else {
+                throw EnhancementError.enhancementFailed
+            }
             return (
-                AIEnhancementOutputFilter.filter(
-                    result.trimmingCharacters(in: .whitespacesAndNewlines)
-                ),
+                filteredResult,
                 systemMessage,
                 formattedText
             )
@@ -382,6 +416,7 @@ class AIEnhancementService: ObservableObject {
             return .notConfigured
         case .httpError(let statusCode, let message):
             if statusCode == 429 { return .rateLimitExceeded }
+            if statusCode == 408 { return .timeout }
             if (500...599).contains(statusCode) { return .serverError }
             return .customError("HTTP \(statusCode): \(message)")
         case .noResultReturned:
@@ -398,20 +433,20 @@ class AIEnhancementService: ObservableObject {
     }
 
     private var retryOnTimeout: Bool {
-        UserDefaults.standard.bool(forKey: "EnhancementRetryOnTimeout")
+        EnhancementRequestSettings.retryOnTimeout
     }
 
     private func makeRequestWithRetry(
         text: String,
         configuration: EnhancementRuntimeConfiguration,
         contextSnapshot: RecordingContextSnapshot?,
-        maxRetries: Int = 3,
+        maxAttempts: Int = EnhancementRequestSettings.maximumAttempts,
         initialDelay: TimeInterval = 1.0
     ) async throws -> (text: String, systemMessage: String?, userMessage: String?) {
         var retries = 0
         var currentDelay = initialDelay
 
-        while retries < maxRetries {
+        while retries < maxAttempts {
             do {
                 return try await makeRequest(
                     text: text,
@@ -422,25 +457,25 @@ class AIEnhancementService: ObservableObject {
                 switch error {
                 case .networkError, .serverError, .rateLimitExceeded:
                     retries += 1
-                    if retries < maxRetries {
+                    if retries < maxAttempts {
                         logger.warning(
-                            "Request failed, retrying in \(currentDelay, privacy: .public)s... (Attempt \(retries, privacy: .public)/\(maxRetries, privacy: .public))"
+                            "Request failed, retrying in \(currentDelay, privacy: .public)s... (Attempt \(retries, privacy: .public)/\(maxAttempts, privacy: .public))"
                         )
                         try await Task.sleep(nanoseconds: UInt64(currentDelay * 1_000_000_000))
                         currentDelay *= 2
                     } else {
-                        logger.error("Request failed after \(maxRetries, privacy: .public) retries.")
+                        logger.error("Request failed after \(maxAttempts, privacy: .public) attempts.")
                         throw error
                     }
                 case .timeout:
                     if retryOnTimeout {
                         retries += 1
-                        if retries < maxRetries {
+                        if retries < maxAttempts {
                             logger.warning(
-                                "Request timed out, retrying immediately... (Attempt \(retries, privacy: .public)/\(maxRetries, privacy: .public))"
+                                "Request timed out, retrying immediately... (Attempt \(retries, privacy: .public)/\(maxAttempts, privacy: .public))"
                             )
                         } else {
-                            logger.error("Request timed out after \(maxRetries, privacy: .public) retries.")
+                            logger.error("Request timed out after \(maxAttempts, privacy: .public) attempts.")
                             throw error
                         }
                     } else {
@@ -457,14 +492,14 @@ class AIEnhancementService: ObservableObject {
                         nsError.code)
                 {
                     retries += 1
-                    if retries < maxRetries {
+                    if retries < maxAttempts {
                         logger.warning(
-                            "Request failed with network error, retrying in \(currentDelay, privacy: .public)s... (Attempt \(retries, privacy: .public)/\(maxRetries, privacy: .public))"
+                            "Request failed with network error, retrying in \(currentDelay, privacy: .public)s... (Attempt \(retries, privacy: .public)/\(maxAttempts, privacy: .public))"
                         )
                         try await Task.sleep(nanoseconds: UInt64(currentDelay * 1_000_000_000))
                         currentDelay *= 2
                     } else {
-                        logger.error("Request failed after \(maxRetries, privacy: .public) retries with network error.")
+                        logger.error("Request failed after \(maxAttempts, privacy: .public) attempts with network error.")
                         throw EnhancementError.networkError
                     }
                 } else {
@@ -488,7 +523,8 @@ class AIEnhancementService: ObservableObject {
             let requestResult = try await makeRequestWithRetry(
                 text: text,
                 configuration: configuration,
-                contextSnapshot: contextSnapshot
+                contextSnapshot: contextSnapshot,
+                maxAttempts: EnhancementRequestSettings.maximumAttempts
             )
             let endTime = Date()
             let duration = endTime.timeIntervalSince(startTime)
@@ -602,6 +638,7 @@ enum EnhancementError: Error {
     case notConfigured
     case invalidResponse
     case enhancementFailed
+    case outputTruncated
     case networkError
     case serverError
     case rateLimitExceeded
@@ -618,6 +655,8 @@ extension EnhancementError: LocalizedError {
             return String(localized: "Invalid response from AI provider.")
         case .enhancementFailed:
             return String(localized: "AI enhancement failed to process the text.")
+        case .outputTruncated:
+            return String(localized: "The AI provider stopped before completing the enhancement.")
         case .networkError:
             return String(localized: "Network connection failed. Check your internet.")
         case .serverError:

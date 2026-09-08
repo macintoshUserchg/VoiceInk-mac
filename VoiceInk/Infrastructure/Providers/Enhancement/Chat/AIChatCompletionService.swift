@@ -31,6 +31,28 @@ extension AIService {
                 systemPrompt: systemPrompt,
                 timeout: timeout
             )
+        case .openRouter:
+            let policy = OpenRouterRequestPolicy.lowLatency(
+                modelName: resolvedModel,
+                modelMetadata: openRouterModelMetadata(for: resolvedModel)
+            )
+            let completion = try await OpenRouterClient.chatCompletion(
+                apiKey: try chatAPIKey(for: provider, modelName: resolvedModel),
+                model: policy.model,
+                messages: messages,
+                systemPrompt: systemPrompt,
+                temperature: policy.temperature,
+                reasoning: policy.reasoning,
+                provider: policy.provider,
+                includeRouterMetadata: true,
+                appReferer: URL(string: "https://tryvoiceink.com"),
+                appTitle: "VoiceInk",
+                timeout: timeout
+            )
+            guard !OpenRouterRequestPolicy.outputWasTruncated(finishReason: completion.finishReason) else {
+                throw EnhancementError.outputTruncated
+            }
+            result = completion.text
         case .custom:
             guard
                 let customConfiguration = CustomAIProviderManager.shared.requestConfiguration(forModel: resolvedModel),
@@ -88,7 +110,11 @@ extension AIService {
             )
         }
 
-        return AIEnhancementOutputFilter.filter(result)
+        let filteredResult = AIEnhancementOutputFilter.filter(result)
+        guard !filteredResult.isEmpty else {
+            throw EnhancementError.enhancementFailed
+        }
+        return filteredResult
     }
 
     private func chatAPIKey(for provider: AIProvider, modelName: String) throws -> String {
