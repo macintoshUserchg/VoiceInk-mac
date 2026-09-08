@@ -51,9 +51,14 @@ struct ReasoningConfig {
         "openai/gpt-oss-20b",
     ]
 
-    // Cerebras GLM supports "none".
+    // Groq Qwen supports "none" for non-thinking, low-latency requests.
+    static let groqNoneReasoningModels: Set<String> = [
+        "qwen/qwen3.8-27b"
+    ]
+
+    // Cerebras Qwen supports "none" for low-latency requests.
     static let cerebrasNoneReasoningModels: Set<String> = [
-        "zai-glm-4.7"
+        "qwen-3.8-27b"
     ]
 
     static func getReasoningParameter(for provider: AIProvider, modelName: String) -> String? {
@@ -67,7 +72,11 @@ struct ReasoningConfig {
                 return "none"
             }
         case .groq:
-            if groqGPTOSSMinimumReasoningModels.contains(modelName) { return "low" }
+            if groqGPTOSSMinimumReasoningModels.contains(modelName) {
+                return "low"
+            } else if groqNoneReasoningModels.contains(modelName) {
+                return "none"
+            }
         default:
             return nil
         }

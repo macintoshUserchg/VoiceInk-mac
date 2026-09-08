@@ -99,13 +99,13 @@ enum AIProvider: String, CaseIterable {
         case .cerebras:
             return [
                 "gpt-oss-120b",
-                "gemma-4-31b",
-                "zai-glm-4.7",
+                "qwen-3.8-27b",
             ]
         case .groq:
             return [
                 "openai/gpt-oss-120b",
                 "openai/gpt-oss-20b",
+                "qwen/qwen3.8-27b",
             ]
         case .gemini:
             return [
