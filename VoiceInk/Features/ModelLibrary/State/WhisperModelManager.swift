@@ -184,14 +184,17 @@ class WhisperModelManager: ObservableObject {
             }
 
             Task {
-                await withTaskCancellationHandler {
-                    observation.invalidate()
-                    if finished.exchange(true, ordering: .acquiring) == false {
-                        continuation.resume(throwing: CancellationError())
+                await withTaskCancellationHandler(
+                    operation: {
+                        await withCheckedContinuation { (_: CheckedContinuation<Void, Never>) in }
+                    },
+                    onCancel: {
+                        observation.invalidate()
+                        if finished.exchange(true, ordering: .acquiring) == false {
+                            continuation.resume(throwing: CancellationError())
+                        }
                     }
-                } operation: {
-                    await withCheckedContinuation { (_: CheckedContinuation<Void, Never>) in }
-                }
+                )
             }
         }
     }
@@ -366,7 +369,7 @@ class WhisperModelManager: ObservableObject {
         let destinationURL = modelsDirectory.appendingPathComponent("\(baseName).bin")
 
         if FileManager.default.fileExists(atPath: destinationURL.path) {
-            await NotificationManager.shared.showNotification(
+            NotificationManager.shared.showNotification(
                 title: String(format: String(localized: "A model named %@.bin already exists"), baseName),
                 type: .warning,
                 duration: 4.0
@@ -383,14 +386,14 @@ class WhisperModelManager: ObservableObject {
 
             onModelsChanged?()
 
-            await NotificationManager.shared.showNotification(
+            NotificationManager.shared.showNotification(
                 title: String(format: String(localized: "Imported %@"), destinationURL.lastPathComponent),
                 type: .success,
                 duration: 3.0
             )
         } catch {
             logError("Failed to import local model", error)
-            await NotificationManager.shared.showNotification(
+            NotificationManager.shared.showNotification(
                 title: String(format: String(localized: "Failed to import model: %@"), error.localizedDescription),
                 type: .error,
                 duration: 5.0

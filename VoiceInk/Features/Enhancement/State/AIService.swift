@@ -574,7 +574,7 @@ class AIService: ObservableObject {
     func checkOllamaConnection(completion: @escaping (Bool) -> Void) {
         Task { [weak self] in
             guard let self = self else { return }
-            await self.refreshOllamaAvailability()
+            _ = await self.refreshOllamaAvailability()
             await MainActor.run {
                 completion(self.ollamaService.isConnected)
             }
@@ -589,7 +589,7 @@ class AIService: ObservableObject {
     func refreshOllamaAvailabilityInBackground() {
         Task { [weak self] in
             guard let self else { return }
-            await self.refreshOllamaAvailability()
+            _ = await self.refreshOllamaAvailability()
         }
     }
 
