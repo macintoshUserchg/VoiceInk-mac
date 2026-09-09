@@ -718,6 +718,17 @@ class AIService: ObservableObject {
     }
 
     @MainActor
+    func fetchOpenRouterModelsIfNeededForMigration() async {
+        guard openRouterModelCatalog.isEmpty,
+            APIKeyManager.shared.hasAPIKey(forProvider: AIProvider.openRouter.rawValue)
+        else {
+            return
+        }
+
+        await fetchOpenRouterModels()
+    }
+
+    @MainActor
     func fetchOpenRouterModels() async {
         guard !isOpenRouterCatalogRefreshing else { return }
         isOpenRouterCatalogRefreshing = true
@@ -728,7 +739,15 @@ class AIService: ObservableObject {
             openRouterModelCatalog = catalog
             openRouterModels = catalog.map(\.id)
             saveOpenRouterModels()
-            if selectedProvider == .openRouter,
+            if !openRouterModels.isEmpty,
+                let savedModel = selectedModels[.openRouter],
+                !openRouterModels.contains(savedModel)
+            {
+                let replacement = openRouterModels.contains(AIProvider.openRouter.defaultModel)
+                    ? AIProvider.openRouter.defaultModel
+                    : openRouterModels[0]
+                selectModel(replacement, for: .openRouter)
+            } else if selectedProvider == .openRouter,
                 selectedModels[.openRouter] == nil,
                 !openRouterModels.isEmpty
             {

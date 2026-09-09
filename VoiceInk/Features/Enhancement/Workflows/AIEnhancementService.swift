@@ -233,152 +233,31 @@ class AIEnhancementService: ObservableObject {
             contextSnapshot: contextSnapshot
         )
 
-        if provider == .ollama {
-            do {
-                let result = try await aiService.enhanceWithOllama(
-                    text: formattedText,
-                    systemPrompt: systemMessage,
-                    model: modelName,
-                    timeout: requestTimeout
-                )
-                return (
-                    AIEnhancementOutputFilter.filter(result),
-                    systemMessage,
-                    formattedText
-                )
-            } catch {
-                if let localError = error as? LocalAIError {
-                    switch localError {
-                    case .timeout:
-                        throw EnhancementError.timeout
-                    default:
-                        throw EnhancementError.customError(
-                            localError.errorDescription ?? "An unknown Ollama error occurred.")
-                    }
-                } else {
-                    throw EnhancementError.customError(error.localizedDescription)
-                }
-            }
-        }
-
-        if provider == .localCLI {
-            do {
-                let result = try await aiService.enhanceWithLocalCLI(
-                    systemPrompt: systemMessage, userPrompt: formattedText)
-                return (
-                    AIEnhancementOutputFilter.filter(result),
-                    systemMessage,
-                    formattedText
-                )
-            } catch {
-                if let localError = error as? LocalCLIError {
-                    throw EnhancementError.customError(
-                        localError.errorDescription ?? "An unknown Local CLI error occurred.")
-                } else {
-                    throw EnhancementError.customError(error.localizedDescription)
-                }
-            }
-        }
-
-        if provider != .openRouter {
+        if provider != .openRouter, provider != .ollama, provider != .localCLI {
             try await waitForRateLimit()
         }
 
         do {
-            let result: String
-            switch provider {
-            case .gemini:
-                result = try await GeminiLLMClient.chatCompletion(
-                    apiKey: try apiKey(for: provider, modelName: modelName),
-                    model: modelName,
-                    messages: [.user(formattedText)],
-                    systemPrompt: systemMessage,
-                    thinkingLevel: ReasoningConfig.geminiThinkingLevel(for: modelName),
-                    store: false,
-                    timeout: requestTimeout
-                )
-            case .anthropic:
-                result = try await AnthropicLLMClient.chatCompletion(
-                    apiKey: try apiKey(for: provider, modelName: modelName),
-                    model: modelName,
-                    messages: [.user(formattedText)],
-                    systemPrompt: systemMessage,
-                    timeout: requestTimeout
-                )
-            case .openRouter:
-                let modelMetadata = aiService.openRouterModelMetadata(for: modelName)
-                let policy = OpenRouterRequestPolicy.lowLatency(
-                    modelName: modelName,
-                    modelMetadata: modelMetadata
-                )
-                let completion = try await OpenRouterClient.chatCompletion(
-                    apiKey: try apiKey(for: provider, modelName: modelName),
-                    model: policy.model,
-                    messages: [.user(formattedText)],
-                    systemPrompt: systemMessage,
-                    temperature: policy.temperature,
-                    reasoning: policy.reasoning,
-                    provider: policy.provider,
-                    includeRouterMetadata: true,
-                    appReferer: URL(string: "https://tryvoiceink.com"),
-                    appTitle: "VoiceInk",
-                    timeout: requestTimeout
-                )
-                guard !OpenRouterRequestPolicy.outputWasTruncated(finishReason: completion.finishReason) else {
-                    throw EnhancementError.outputTruncated
-                }
-                let routedProvider = completion.provider ?? "unknown"
-                let routingAttempt = completion.metadata?.attempt ?? 0
-                let reasoningTokens = completion.usage?.reasoningTokens ?? 0
+            let completion = try await aiService.performChatCompletion(
+                provider: provider,
+                modelName: modelName,
+                messages: [.user(formattedText)],
+                systemPrompt: systemMessage,
+                localUserPrompt: formattedText,
+                timeout: requestTimeout
+            )
+            if let openRouterCompletion = completion.openRouterCompletion {
+                let routedProvider = openRouterCompletion.provider ?? "unknown"
+                let routingAttempt = openRouterCompletion.metadata?.attempt ?? 0
+                let reasoningTokens = openRouterCompletion.usage?.reasoningTokens ?? 0
                 logger.debug(
                     "OpenRouter completed requestedModel=\(modelName, privacy: .public) routedProvider=\(routedProvider, privacy: .public) routingAttempt=\(routingAttempt, privacy: .public) reasoningTokens=\(reasoningTokens, privacy: .public)"
                 )
-                result = completion.text
-            case .custom:
-                guard
-                    let customConfiguration = CustomAIProviderManager.shared.requestConfiguration(forModel: modelName),
-                    let baseURL = URL(string: customConfiguration.baseURL)
-                else {
-                    throw EnhancementError.notConfigured
-                }
-                result = try await OpenAILLMClient.chatCompletion(
-                    baseURL: baseURL,
-                    apiKey: customConfiguration.apiKey,
-                    model: customConfiguration.modelName,
-                    messages: [.user(formattedText)],
-                    systemPrompt: systemMessage,
-                    temperature: 0.3,
-                    timeout: requestTimeout
-                )
-            default:
-                guard let baseURL = URL(string: provider.baseURL) else {
-                    throw EnhancementError.customError(
-                        "\(provider.rawValue) has an invalid API endpoint URL. Please update it in AI settings.")
-                }
-                let reasoningEffort = ReasoningConfig.getReasoningParameter(
-                    for: provider,
-                    modelName: modelName
-                )
-                let extraBody = ReasoningConfig.getExtraBodyParameters(
-                    for: provider,
-                    modelName: modelName
-                )
-                result = try await OpenAILLMClient.chatCompletion(
-                    baseURL: baseURL,
-                    apiKey: try apiKey(for: provider, modelName: modelName),
-                    model: modelName,
-                    messages: [.user(formattedText)],
-                    systemPrompt: systemMessage,
-                    temperature: 0.3,
-                    reasoningEffort: reasoningEffort,
-                    extraBody: extraBody,
-                    timeout: requestTimeout
-                )
             }
             let filteredResult = AIEnhancementOutputFilter.filter(
-                result.trimmingCharacters(in: .whitespacesAndNewlines)
+                completion.text.trimmingCharacters(in: .whitespacesAndNewlines)
             )
-            guard !filteredResult.isEmpty else {
+            guard provider == .ollama || provider == .localCLI || !filteredResult.isEmpty else {
                 throw EnhancementError.enhancementFailed
             }
             return (
@@ -388,26 +267,25 @@ class AIEnhancementService: ObservableObject {
             )
         } catch let error as LLMKitError {
             throw mapLLMKitError(error)
+        } catch let error as LocalAIError {
+            if case .timeout = error {
+                throw EnhancementError.timeout
+            }
+            throw EnhancementError.customError(
+                error.errorDescription ?? "An unknown Ollama error occurred."
+            )
+        } catch let error as LocalCLIError {
+            if case .timeout = error {
+                throw EnhancementError.timeout
+            }
+            throw EnhancementError.customError(
+                error.errorDescription ?? "An unknown Local CLI error occurred."
+            )
         } catch let error as EnhancementError {
             throw error
         } catch {
             throw EnhancementError.customError(error.localizedDescription)
         }
-    }
-
-    private func apiKey(for provider: AIProvider, modelName: String) throws -> String {
-        if provider == .custom {
-            guard let customConfiguration = CustomAIProviderManager.shared.requestConfiguration(forModel: modelName)
-            else {
-                throw EnhancementError.notConfigured
-            }
-            return customConfiguration.apiKey
-        }
-
-        guard let key = APIKeyManager.shared.getAPIKey(forProvider: provider.rawValue), !key.isEmpty else {
-            throw EnhancementError.notConfigured
-        }
-        return key
     }
 
     private func mapLLMKitError(_ error: LLMKitError) -> EnhancementError {

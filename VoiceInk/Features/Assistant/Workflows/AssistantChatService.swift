@@ -86,13 +86,23 @@ final class AssistantChatService {
     }
 
     private static func isTimeout(_ error: Error) -> Bool {
-        if let llmKitError = error as? LLMKitError, case .timeout = llmKitError {
-            return true
+        if let llmKitError = error as? LLMKitError {
+            switch llmKitError {
+            case .timeout:
+                return true
+            case .httpError(let statusCode, _):
+                return statusCode == 408
+            default:
+                break
+            }
         }
         if let enhancementError = error as? EnhancementError, case .timeout = enhancementError {
             return true
         }
         if let localError = error as? LocalAIError, case .timeout = localError {
+            return true
+        }
+        if let localCLIError = error as? LocalCLIError, case .timeout = localCLIError {
             return true
         }
 
