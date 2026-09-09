@@ -304,7 +304,7 @@ class AIEnhancementService: ObservableObject {
         case .timeout:
             return .timeout
         case .invalidURL, .decodingError, .encodingError:
-            return .customError(error.localizedDescription ?? "An unknown error occurred.")
+            return .customError(error.localizedDescription)
         case .unsupportedModel(let model):
             return .customError("Unsupported model: \(model)")
         }
@@ -430,11 +430,8 @@ class AIEnhancementService: ObservableObject {
             return
         }
 
-        if let capturedText = await screenCaptureService.captureAndExtractText() {
-            await MainActor.run {
-                self.objectWillChange.send()
-            }
-        }
+        guard await screenCaptureService.captureAndExtractText() != nil else { return }
+        objectWillChange.send()
     }
 
     func captureClipboardContext() {
