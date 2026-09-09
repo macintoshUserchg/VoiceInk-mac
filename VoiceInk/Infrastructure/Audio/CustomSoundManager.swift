@@ -289,8 +289,9 @@ class CustomSoundManager: ObservableObject {
         notifyCustomSoundsChanged()
     }
 
-    func setCustomSound(url: URL, for type: SoundType) -> Result<Void, CustomSoundError> {
-        let result = validateAudioFile(url: url)
+    @MainActor
+    func setCustomSound(url: URL, for type: SoundType) async -> Result<Void, CustomSoundError> {
+        let result = await validateAudioFile(url: url)
         switch result {
         case .success:
             let copyResult = copySoundFile(from: url, standardName: type.standardName)
@@ -369,19 +370,23 @@ class CustomSoundManager: ObservableObject {
         }
     }
 
-    private func validateAudioFile(url: URL) -> Result<Void, CustomSoundError> {
+    private func validateAudioFile(url: URL) async -> Result<Void, CustomSoundError> {
         guard FileManager.default.fileExists(atPath: url.path) else {
             return .failure(.fileNotFound)
         }
 
-        let player: AVAudioPlayer
         do {
-            player = try AVAudioPlayer(contentsOf: url)
+            _ = try AVAudioPlayer(contentsOf: url)
         } catch {
             return .failure(.invalidAudioFile)
         }
 
-        let duration = player.duration
+        let duration: TimeInterval
+        do {
+            duration = try await AVAsset(url: url).load(.duration).seconds
+        } catch {
+            return .failure(.invalidAudioFile)
+        }
 
         guard duration.isFinite && duration > 0 else {
             return .failure(.invalidAudioFile)

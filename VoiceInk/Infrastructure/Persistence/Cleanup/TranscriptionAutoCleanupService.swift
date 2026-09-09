@@ -28,8 +28,9 @@ final class TranscriptionAutoCleanupService {
         )
 
         if UserDefaults.standard.bool(forKey: CleanupSettingsKeys.isTranscriptionCleanupEnabled) {
-            let worker = TranscriptionCleanupWorker(modelContainer: modelContext.container)
+            let modelContainer = modelContext.container
             Task { [weak self] in
+                let worker = await Self.makeWorker(modelContainer: modelContainer)
                 guard let self else { return }
                 await self.sweepOldTranscriptions(worker: worker)
                 await self.cleanupOrphanAudioFiles(worker: worker)
@@ -42,7 +43,7 @@ final class TranscriptionAutoCleanupService {
     }
 
     func runManualCleanup(modelContext: ModelContext) async {
-        let worker = TranscriptionCleanupWorker(modelContainer: modelContext.container)
+        let worker = await Self.makeWorker(modelContainer: modelContext.container)
         await sweepOldTranscriptions(worker: worker)
     }
 
@@ -53,8 +54,9 @@ final class TranscriptionAutoCleanupService {
         let minutes = UserDefaults.standard.integer(forKey: CleanupSettingsKeys.transcriptionRetentionMinutes)
         if minutes > 0 {
             if let modelContext = self.modelContext {
-                let worker = TranscriptionCleanupWorker(modelContainer: modelContext.container)
+                let modelContainer = modelContext.container
                 Task { [weak self] in
+                    let worker = await Self.makeWorker(modelContainer: modelContainer)
                     await self?.sweepOldTranscriptions(worker: worker)
                 }
             }
@@ -123,6 +125,14 @@ final class TranscriptionAutoCleanupService {
         } catch {
             logger.error("Failed during orphan audio cleanup: \(error, privacy: .public)")
         }
+    }
+
+    private nonisolated static func makeWorker(
+        modelContainer: ModelContainer
+    ) async -> TranscriptionCleanupWorker {
+        await Task.detached(priority: .utility) {
+            TranscriptionCleanupWorker(modelContainer: modelContainer)
+        }.value
     }
 }
 

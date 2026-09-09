@@ -7,6 +7,7 @@ final class NotificationManager {
 
     private var notificationWindow: NSPanel?
     private var dismissTimer: Timer?
+    private var notificationID: UUID?
 
     private init() {}
 
@@ -19,6 +20,8 @@ final class NotificationManager {
     ) {
         dismissTimer?.invalidate()
         dismissTimer = nil
+        let notificationID = UUID()
+        self.notificationID = notificationID
 
         if let existingWindow = notificationWindow {
             existingWindow.close()
@@ -36,7 +39,7 @@ final class NotificationManager {
             duration: duration,
             onClose: { [weak self] in
                 Task { @MainActor in
-                    self?.dismissNotification()
+                    self?.dismissNotification(ifCurrent: notificationID)
                 }
             },
             onTap: onTap,
@@ -77,7 +80,7 @@ final class NotificationManager {
             repeats: false
         ) { [weak self] _ in
             Task { @MainActor in
-                self?.dismissNotification()
+                self?.dismissNotification(ifCurrent: notificationID)
             }
         }
     }
@@ -103,6 +106,7 @@ final class NotificationManager {
         guard let window = notificationWindow else { return }
 
         notificationWindow = nil
+        notificationID = nil
 
         dismissTimer?.invalidate()
         dismissTimer = nil
@@ -117,5 +121,10 @@ final class NotificationManager {
                 window.close()
 
             })
+    }
+
+    private func dismissNotification(ifCurrent notificationID: UUID) {
+        guard self.notificationID == notificationID else { return }
+        dismissNotification()
     }
 }
